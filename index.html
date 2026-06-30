@@ -1304,6 +1304,118 @@
       background: var(--border2);
       border-radius: 3px
     }
+
+    /* ─ Confirm Save Modal ─ */
+    .modal-wide {
+      width: 700px;
+      max-width: calc(100vw - 2rem);
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column
+    }
+
+    .modal-wide h3 {
+      margin-bottom: .6rem;
+      flex-shrink: 0
+    }
+
+    .modal-scroll {
+      overflow-y: auto;
+      flex: 1;
+      margin: 0 -1.5rem;
+      padding: 0 1.5rem
+    }
+
+    .modal-scroll::-webkit-scrollbar { width: 5px }
+    .modal-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px }
+
+    .char-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700
+    }
+
+    .char-ok {
+      background: var(--green-bg);
+      color: var(--green);
+      border: 1px solid var(--green-b)
+    }
+
+    .char-err-badge {
+      background: #FEE2E2;
+      color: #991B1B;
+      border: 1px solid #FCA5A5
+    }
+
+    .ptable tr.row-err td { background: rgba(220,38,38,.07) }
+    .ptable tr.row-err:hover td { background: rgba(220,38,38,.13) }
+
+    .old-title {
+      color: var(--t3);
+      text-decoration: line-through;
+      font-size: 11px;
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis
+    }
+
+    .new-title-arrow {
+      color: var(--t3);
+      font-size: 10px;
+      margin: 1px 0;
+      display: block
+    }
+
+    .new-title {
+      font-weight: 700;
+      color: var(--text);
+      font-size: 12px;
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis
+    }
+
+    /* Cal metadata sidebar */
+    .cal-meta-section {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px dashed var(--border2)
+    }
+
+    .cal-meta-section .cml {
+      display: block;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--t3);
+      margin-bottom: 4px
+    }
+
+    .cal-meta-section textarea,
+    .cal-meta-section input[type=text] {
+      width: 100%;
+      padding: 6px 8px;
+      font-size: 12px;
+      border: 1px solid var(--border2);
+      border-radius: var(--r2);
+      background: var(--card);
+      color: var(--text);
+      resize: vertical;
+      margin-bottom: 8px
+    }
+
+    .cal-meta-section textarea:focus,
+    .cal-meta-section input[type=text]:focus {
+      outline: none;
+      border-color: var(--red);
+      box-shadow: 0 0 0 3px rgba(255,0,0,.08)
+    }
   </style>
 </head>
 
@@ -1348,6 +1460,8 @@
       ytChannels: [], ytSelectedChannel: null,
       hidden: {},  // videoId -> true (disembunyikan dari daftar)
       showHidden: false,
+      calMeta: { titles: '', desc: '', tags: '' },
+      previewData: null,
       bulk: {
         subTab: 'unsched',  // 'unsched' | 'sched'
         mode: 'interval',
@@ -1770,6 +1884,84 @@
       if (btn) { btn.disabled = false; btn.textContent = 'Terapkan Jadwal'; }
       render();
     }
+
+    /* ─ Unified staging & execution for both Bulk and Calendar saves ─ */
+    function prepareSavePreview(source) {
+      // Step 1: Sync current form values into state
+      if (source === 'bulk') {
+        A.bulk.time = val('b-time') || A.bulk.time;
+        if (A.bulk.mode === 'interval') A.bulk.startDate = val('b-start') || A.bulk.startDate;
+        if (A.bulk.mode === 'custom') {
+          A.bulk.selected.forEach(function (id) { var v = val('bc-' + id); if (v) A.bulk.customDates[id] = v; });
+        }
+        A.bulk.titles = val('b-titles');
+        A.bulk.desc   = val('b-desc');
+        A.bulk.tags   = val('b-tags');
+      } else {
+        A.calMeta.titles = val('cal-titles');
+        A.calMeta.desc   = val('cal-desc');
+        A.calMeta.tags   = val('cal-tags');
+      }
+
+      // Step 2: Build preview rows
+      var previewItems = [], hasError = false;
+
+      if (source === 'bulk') {
+        var bPreview = getBulkPreview();
+        if (!bPreview.length) { toast('Tidak ada jadwal untuk diterapkan', 'err'); return; }
+        var bTitleLines = (A.bulk.titles || '').split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
+        for (var bi = 0; bi < bPreview.length; bi++) {
+          var bItem = bPreview[bi];
+          var bVObj = A.videos.find(function (x) { return x.id === bItem.id; });
+          var bOldTitle = getTitle(bVObj);
+          var bNewTitle = bTitleLines[bi] || bOldTitle;
+          var bLen = bNewTitle.length;
+          var bErr = bLen > 100;
+          if (bErr) hasError = true;
+          previewItems.push({
+            id: bItem.id, publishAt: bItem.publishAt, dateLabel: fmtDate(bItem.publishAt),
+            thumb: getThumb(bVObj), oldTitle: bOldTitle, newTitle: bNewTitle,
+            changed: bNewTitle !== bOldTitle, len: bLen, err: bErr
+          });
+        }
+      } else {
+        var calIds = Object.keys(A.calScheduled);
+        if (!calIds.length) { toast('Tidak ada jadwal untuk disimpan', 'err'); return; }
+        var cTitleLines = (A.calMeta.titles || '').split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
+        for (var ci = 0; ci < calIds.length; ci++) {
+          var cVid = calIds[ci];
+          var cPub = A.calScheduled[cVid];
+          var cVObj = A.videos.find(function (x) { return x.id === cVid; });
+          var cOldTitle = getTitle(cVObj);
+          var cNewTitle = cTitleLines[ci] || cOldTitle;
+          var cLen = cNewTitle.length;
+          var cErr = cLen > 100;
+          if (cErr) hasError = true;
+          previewItems.push({
+            id: cVid, publishAt: cPub, dateLabel: fmtDate(cPub),
+            thumb: getThumb(cVObj), oldTitle: cOldTitle, newTitle: cNewTitle,
+            changed: cNewTitle !== cOldTitle, len: cLen, err: cErr
+          });
+        }
+      }
+
+      // Step 3: Show confirmation modal
+      A.previewData = { source: source, rows: previewItems, hasError: hasError };
+      A.modal = 'confirm_save';
+      render();
+    }
+
+    function executeSchedule() {
+      if (!A.previewData || A.previewData.hasError) return;
+      var src = A.previewData.source;
+      A.modal = null;
+      A.previewData = null;
+      render(); // rebuild DOM before running async API loop
+      if (src === 'bulk') applyBulk();
+      else doSaveCalScheduled();
+    }
+
+    function prepareCalSave() { prepareSavePreview('cal'); }
 
     function toggleBulkSel(id) {
       var idx = A.bulk.selected.indexOf(id);
@@ -2373,14 +2565,7 @@
     function buildCustomPreviewRows() { return [] }
 
     function saveBulkValues() {
-      // Sync all form values before applying
-      A.bulk.startDate = val('b-start') || A.bulk.startDate || tomorrow();
-      A.bulk.time = val('b-time') || A.bulk.time;
-      if (A.bulk.mode === 'custom') {
-        A.bulk.selected.forEach(function (id) { var v = val('bc-' + id); if (v) A.bulk.customDates[id] = v; });
-      }
-      if (!confirm('Apakah kamu yakin ingin menerapkan jadwal massal ini ke YouTube?')) return;
-      applyBulk();
+      prepareSavePreview('bulk');
     }
 
     /* Calendar tab */
@@ -2404,28 +2589,40 @@
       render();
     }
 
-    async function saveCalScheduled() {
+    async function doSaveCalScheduled() {
       var ids = Object.keys(A.calScheduled);
       if (ids.length === 0) return;
-      if (!confirm('Apakah kamu yakin ingin menyimpan ' + ids.length + ' jadwal ini ke YouTube?')) return;
+      var titleLines = (A.calMeta.titles || '').split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
+      var descText  = A.calMeta.desc || '';
+      var tagsArr   = (A.calMeta.tags || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+      var hasMeta   = !!(A.calMeta.titles || A.calMeta.desc || A.calMeta.tags);
       var btn = $('cal-save-btn'); if (btn) { btn.disabled = true; btn.textContent = 'Menyimpan...'; }
       var ok = 0, fail = 0;
       for (var i = 0; i < ids.length; i++) {
-        var vid = ids[i];
-        var pub = A.calScheduled[vid];
-        var vObj = A.videos.find(function (x) { return x.id === vid });
-
-        var metadata = {
-          title: getTitle(vObj),
-          description: (vObj && vObj.snippet && vObj.snippet.description) || '',
-          tags: (vObj && vObj.snippet && vObj.snippet.tags) || []
-        };
+        var vid  = ids[i];
+        var pub  = A.calScheduled[vid];
+        var vObj = A.videos.find(function (x) { return x.id === vid; });
+        var newTitle = (hasMeta && titleLines[i]) ? titleLines[i] : getTitle(vObj);
+        var metadata;
+        if (hasMeta) {
+          metadata = {
+            title: newTitle,
+            description: descText || ((vObj && vObj.snippet && vObj.snippet.description) || ''),
+            tags: tagsArr.length ? tagsArr : ((vObj && vObj.snippet && vObj.snippet.tags) || [])
+          };
+        } else {
+          metadata = {
+            title: getTitle(vObj),
+            description: (vObj && vObj.snippet && vObj.snippet.description) || '',
+            tags: (vObj && vObj.snippet && vObj.snippet.tags) || []
+          };
+        }
         var origCatId = (vObj && vObj.snippet && vObj.snippet.categoryId) ? vObj.snippet.categoryId : '22';
-
         try {
           await apiSet(vid, pub, metadata, origCatId);
           A.scheduled[vid] = pub;
           ok++;
+          if (btn) btn.textContent = 'Menyimpan ' + ok + '/' + ids.length + '...';
         } catch (e) {
           if (e.message === '403_QUOTA' || (e.message && e.message.toLowerCase().includes('quota'))) {
             alert('Process stopped! API Quota Exceeded. Please switch the Client ID and log in again to continue.');
@@ -2436,9 +2633,11 @@
         }
       }
       saveSched();
-      A.calScheduled = {}; // reset
-      if (fail === 0) toast('✓ ' + ok + ' jadwal disimpan!', 'ok');
+      A.calScheduled = {};
+      A.calMeta = { titles: '', desc: '', tags: '' };
+      if (fail === 0) toast('\u2713 ' + ok + ' jadwal disimpan!', 'ok');
       else toast(ok + ' berhasil, ' + fail + ' gagal', 'inf');
+      if (btn) { btn.disabled = false; btn.textContent = '\ud83d\udcbe Simpan ke YT'; }
       render();
     }
 
@@ -2504,6 +2703,17 @@
 
       h += '<div class="fg"><label>Waktu Default (' + tzLabel() + ')</label><input type="time" value="' + esc(A.calTime) + '" oninput="A.calTime=this.value"></div>';
 
+      // ── Bulk Metadata (optional) ──────────────────────────────
+      h += '<div class="cal-meta-section">';
+      h += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--t3);margin-bottom:8px">\ud83d\udcdd Update Metadata (Opsional)</div>';
+      h += '<label class="cml">Judul (1 Baris = 1 Video)</label>';
+      h += '<textarea id="cal-titles" rows="3" placeholder="Judul Video 1&#10;Judul Video 2" oninput="A.calMeta.titles=this.value">' + esc(A.calMeta.titles || '') + '</textarea>';
+      h += '<label class="cml">Deskripsi (Untuk Semua Video)</label>';
+      h += '<textarea id="cal-desc" rows="2" placeholder="Deskripsi bersama..." oninput="A.calMeta.desc=this.value">' + esc(A.calMeta.desc || '') + '</textarea>';
+      h += '<label class="cml">Tags (Pisahkan koma)</label>';
+      h += '<input type="text" id="cal-tags" placeholder="tag1, tag2" value="' + esc(A.calMeta.tags || '') + '" oninput="A.calMeta.tags=this.value">';
+      h += '</div>';
+
       var drafts = getDrafts().filter(function (v) { return !A.scheduled[v.id] && !A.calScheduled[v.id]; });
 
       h += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--t3);margin:12px 0 8px;">Draft Queue (' + drafts.length + ')</div>';
@@ -2526,7 +2736,7 @@
         h += '<div class="info-orange" style="font-size:11px;margin-bottom:8px;">Ada ' + tempCount + ' video belum disimpan!</div>';
         h += '<div style="display:flex;gap:8px;">';
         h += '<button class="btn btn-sm btn-ghost" onclick="A.calScheduled={};render()">Reset</button>';
-        h += '<button class="btn btn-red btn-sm" style="flex:1;" id="cal-save-btn" onclick="saveCalScheduled()">💾 Simpan ke YT</button>';
+        h += '<button class="btn btn-red btn-sm" style="flex:1;" id="cal-save-btn" onclick="prepareCalSave()">\ud83d\udcbe Simpan ke YT</button>';
         h += '</div>';
         h += '</div>';
       }
@@ -2564,6 +2774,88 @@
         '</div></div>';
     }
 
+    function renderConfirmSaveModal() {
+      var pd = A.previewData;
+      if (!pd) return '';
+      var rows = pd.rows, hasError = pd.hasError;
+
+      var h = '<div class="overlay" onclick="if(event.target===this){A.modal=null;A.previewData=null;render()}">';
+      h += '<div class="modal modal-wide">';
+      h += '<h3>\ud83d\ude80 Konfirmasi Jadwal \u2014 ' + rows.length + ' Video</h3>';
+
+      if (hasError) {
+        h += '<div style="padding:9px 12px;border-radius:var(--r3);font-size:12px;line-height:1.55;margin-bottom:10px;background:#FEF2F2;color:#991B1B;border:1px solid #FCA5A5;flex-shrink:0">';
+        h += '\u26a0 Beberapa judul melebihi <b>100 karakter</b>. Perbaiki dahulu sebelum bisa menyimpan.</div>';
+      } else {
+        h += '<div style="padding:9px 12px;border-radius:var(--r3);font-size:12px;margin-bottom:10px;background:var(--green-bg);color:var(--green);border:1px solid var(--green-b);flex-shrink:0">';
+        h += '\u2713 Semua judul valid. Klik <b>Ya, Simpan</b> untuk mengirim ke YouTube API.</div>';
+      }
+
+      h += '<div class="modal-scroll">';
+      h += '<div style="overflow-x:auto"><table class="ptable" style="min-width:500px;width:100%">';
+      h += '<thead><tr>';
+      h += '<th class="pnum">#</th>';
+      h += '<th style="width:62px">Thumb</th>';
+      h += '<th>Judul</th>';
+      h += '<th style="white-space:nowrap">Jadwal Publish</th>';
+      h += '<th style="width:88px;text-align:center">Karakter</th>';
+      h += '</tr></thead><tbody>';
+
+      rows.forEach(function (row, i) {
+        h += '<tr class="' + (row.err ? 'row-err' : '') + '">';
+        h += '<td class="pnum">' + (i + 1) + '</td>';
+
+        // Thumbnail
+        h += '<td style="padding:6px 10px">';
+        if (row.thumb) {
+          h += '<img src="' + esc(row.thumb.url) + '" style="width:56px;height:32px;object-fit:cover;border-radius:3px;display:block" loading="lazy">';
+        } else {
+          h += '<div style="width:56px;height:32px;background:var(--hover);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12px">\u25b6</div>';
+        }
+        h += '</td>';
+
+        // Title column
+        h += '<td style="max-width:240px">';
+        if (row.changed) {
+          h += '<span class="old-title" title="' + esc(row.oldTitle) + '">' + esc(row.oldTitle.length > 46 ? row.oldTitle.slice(0,44) + '\u2026' : row.oldTitle) + '</span>';
+          h += '<span class="new-title-arrow">\u2193</span>';
+          h += '<span class="new-title" title="' + esc(row.newTitle) + '" style="' + (row.err ? 'color:#DC2626' : '') + '">' + esc(row.newTitle.length > 46 ? row.newTitle.slice(0,44) + '\u2026' : row.newTitle) + '</span>';
+        } else {
+          h += '<span style="font-size:12px;font-weight:500" title="' + esc(row.oldTitle) + '">' + esc(row.oldTitle.length > 55 ? row.oldTitle.slice(0,53) + '\u2026' : row.oldTitle) + '</span>';
+        }
+        h += '</td>';
+
+        // Date
+        h += '<td><span class="badge b-sched" style="font-size:10px;white-space:nowrap">' + esc(row.dateLabel) + '</span></td>';
+
+        // Char count
+        h += '<td style="text-align:center">';
+        if (row.err) {
+          h += '<span class="char-badge char-err-badge">' + row.len + '/100 !</span>';
+        } else if (row.changed) {
+          h += '<span class="char-badge char-ok">' + row.len + '/100</span>';
+        } else {
+          h += '<span style="font-size:10px;color:var(--t3)">' + row.len + '/100</span>';
+        }
+        h += '</td>';
+        h += '</tr>';
+      });
+
+      h += '</tbody></table></div>';
+      h += '</div>'; // end modal-scroll
+
+      h += '<div class="modal-footer" style="flex-shrink:0;margin-top:.75rem;padding-top:.75rem;border-top:1px solid var(--border)">';
+      h += '<button class="btn btn-sm" onclick="A.modal=null;A.previewData=null;render()">\u2190 Batal</button>';
+      if (hasError) {
+        h += '<button class="btn btn-red btn-sm" disabled title="Perbaiki judul yang melebihi 100 karakter" style="opacity:.45;cursor:not-allowed">\u2713 Ya, Simpan ke YouTube</button>';
+      } else {
+        h += '<button class="btn btn-red btn-sm" onclick="executeSchedule()">\u2713 Ya, Simpan ke YouTube</button>';
+      }
+      h += '</div>';
+      h += '</div></div>';
+      return h;
+    }
+
     function render() {
       var root = $('root'); if (!root) return;
       var h = '';
@@ -2574,6 +2866,7 @@
       if (A.modal === 'addch') h += renderAddChModal();
       if (A.modal === 'cfg') h += renderCfgModal();
       if (A.modal === 'error') h += renderErrorModal();
+      if (A.modal === 'confirm_save') h += renderConfirmSaveModal();
       root.innerHTML = h; renderHeader();
     }
 
