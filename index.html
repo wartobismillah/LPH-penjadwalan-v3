@@ -26,7 +26,11 @@
         { name: 'Channel Utama', color: '#FF0000' },
         // { name: 'Channel Gaming', color: '#1A56DB' },
         // { name: 'Channel Vlog',   color: '#1A7F3C' },
-      ]
+      ],
+
+      // ── Draft window: only videos uploaded within this many days
+      //    are treated as true drafts. Increase if you upload slowly.
+      draftWindowDays: 90
     };
   </script>
   <!-- ═══════════════════════════════════════════════════════════ -->
@@ -1688,17 +1692,34 @@
 
     async function fetchVideos() {
       try {
-        // ── Langkah 1: Ambil SEMUA video pakai pagination ──────────
+        // ── Draft window cut-off ───────────────────────────────────
+        // Only fetch videos published/uploaded within draftWindowDays.
+        // Results come back newest-first (order=date), so we stop as
+        // soon as we hit a video older than the window — no need to
+        // page through the entire channel history.
+        var windowDays = (CONFIG.draftWindowDays || 90);
+        var cutoff = new Date(Date.now() - windowDays * 86400000); // ms
+
+        // ── Langkah 1: Ambil video terbaru, berhenti saat melewati window ──
         var allSearchItems = [];
         var pageToken = '';
+        var reachedOld = false;
         do {
           var url = 'https://www.googleapis.com/youtube/v3/search?part=snippet&forMine=true&type=video&maxResults=50&order=date';
           if (pageToken) url += '&pageToken=' + encodeURIComponent(pageToken);
           var r1 = await fetch(url, { headers: { Authorization: 'Bearer ' + A.token } });
           var d1 = await r1.json();
           if (d1.error) throw new Error(d1.error.message);
-          if (d1.items && d1.items.length) allSearchItems = allSearchItems.concat(d1.items);
-          pageToken = d1.nextPageToken || '';
+          var pageItems = d1.items || [];
+          for (var pi = 0; pi < pageItems.length; pi++) {
+            var publishedAt = pageItems[pi].snippet && pageItems[pi].snippet.publishedAt;
+            if (publishedAt && new Date(publishedAt) < cutoff) {
+              reachedOld = true;
+              break; // all remaining items are even older
+            }
+            allSearchItems.push(pageItems[pi]);
+          }
+          pageToken = reachedOld ? '' : (d1.nextPageToken || '');
         } while (pageToken);
 
         if (!allSearchItems.length) { A.videos = []; A.step = 'dashboard'; render(); return; }
@@ -2015,13 +2036,21 @@
       render(); toast('Channel dihapus', 'inf');
     }
     function getDrafts() {
-      // search.list?forMine=true sudah hanya return video milik channel aktif
-      // Filter: private (draft & scheduled) dan unlisted
-      // Video public tidak masuk karena search?forMine hanya return yg bisa diakses owner
+      // Only count TRUE drafts:
+      //   1. Must be private (not unlisted — unlisted = already published/shared).
+      //   2. Must have been uploaded within draftWindowDays (default 90 days).
+      //      This prevents years-old private/archived videos from polluting the list.
+      var windowDays = (CONFIG.draftWindowDays || 90);
+      var cutoff = new Date(Date.now() - windowDays * 86400000);
       return A.videos.filter(function (v) {
         var s = v.status || {};
         if (A.hidden[v.id]) return false;
-        return s.privacyStatus === 'private' || s.privacyStatus === 'unlisted';
+        // Only private videos qualify as drafts
+        if (s.privacyStatus !== 'private') return false;
+        // Must be within the draft window
+        var pub = v.snippet && v.snippet.publishedAt;
+        if (pub && new Date(pub) < cutoff) return false;
+        return true;
       });
     }
 
