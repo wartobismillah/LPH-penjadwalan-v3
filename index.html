@@ -339,11 +339,12 @@ function tzLabel(){
 // sudah diinterpretasi browser sebagai LOCAL time,
 // jadi .toISOString() langsung menghasilkan UTC yang benar.
 function localToUTC(date,time){
-  var d = new Date(date+'T'+(time||'00:00')+':00');
+  var dp = date.split('-');
+  var tp = (time||'00:00').split(':');
+  var d = new Date(parseInt(dp[0],10), parseInt(dp[1],10)-1, parseInt(dp[2],10), parseInt(tp[0],10), parseInt(tp[1],10), 0);
   var minTime = Date.now() + (20 * 60 * 1000); // 20-min global buffer
   if (d.getTime() < minTime) d = new Date(minTime);
-  return d.getUTCFullYear() + '-' + pad(d.getUTCMonth()+1) + '-' + pad(d.getUTCDate()) + 'T' + 
-         pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()) + 'Z';
+  return d.toISOString();
 }
 function utcToLocal(iso){
   if(!iso)return{date:'',time:''};
