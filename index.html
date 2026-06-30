@@ -1807,7 +1807,7 @@
 
     /* ─ Per-video actions ─ */
     async function doSchedule(vid) {
-      var date = val('d-' + vid), time = val('t-' + vid) || '10:00';
+      var date = val('d-' + vid), time = val('t-' + vid) || '00:00';
       if (!date) { toast('Pilih tanggal dulu', 'err'); return; }
       var btn = $('save-' + vid); if (btn) { btn.disabled = true; btn.textContent = 'Menyimpan...'; }
       try {
@@ -2601,7 +2601,7 @@
     function handleCalClick(y, m, d) {
       if (!A.calMode) return;
 
-      var time = A.calTime || '10:00';
+      var time = A.calTime || '00:00';
       var dateStr = y + '-' + pad(m + 1) + '-' + pad(d);
       var utcPub = localToUTC(dateStr, time);
 
@@ -2676,7 +2676,7 @@
       var y = A.calY, m = A.calM;
 
       if (A.calMode === undefined) A.calMode = false;
-      if (A.calTime === undefined) A.calTime = '10:00';
+      if (A.calTime === undefined) A.calTime = '00:00';
       if (!A.calScheduled) A.calScheduled = {};
 
       var ev = {};
