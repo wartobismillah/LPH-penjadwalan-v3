@@ -1402,15 +1402,8 @@
       var d = new Date(parseInt(dp[0], 10), parseInt(dp[1], 10) - 1, parseInt(dp[2], 10), parseInt(tp[0], 10), parseInt(tp[1], 10), 0);
       var minTime = Date.now() + (20 * 60 * 1000); // 20-min global buffer
       if (d.getTime() < minTime) d = new Date(minTime);
-      
-      var tzo = -d.getTimezoneOffset();
-      var dif = tzo >= 0 ? '+' : '-';
-      var tzoH = pad(Math.floor(Math.abs(tzo) / 60));
-      var tzoM = pad(Math.abs(tzo) % 60);
-      
-      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' +
-             pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
-             dif + tzoH + ':' + tzoM;
+      // YouTube API requires UTC format: YYYY-MM-DDThh:mm:ss.sssZ
+      return d.toISOString();
     }
     function utcToLocal(iso) {
       if (!iso) return { date: '', time: '' };
@@ -1623,36 +1616,50 @@
       }
     }
     async function apiSet(videoId, publishAt, metadata, categoryId) {
-      // NOTE: When scheduling (publishAt set), do NOT include privacyStatus.
-      // YouTube infers the scheduled-private state from publishAt alone.
-      // Sending privacyStatus:'private' alongside publishAt causes invalidPublishAt on some videos.
-      var statusObj = publishAt ? { publishAt: publishAt } : { privacyStatus: 'private' };
-      var body = { id: videoId, status: statusObj };
-      var part = 'status';
-      if (metadata) {
-        part += ',snippet';
-        body.snippet = {
-          categoryId: categoryId || '22',
-          title: metadata.title,
-          description: metadata.description,
-          tags: metadata.tags
-        };
-      }
-      console.log('[apiSet] Request body:', JSON.stringify(body, null, 2));
-      var r = await fetch('https://www.googleapis.com/youtube/v3/videos?part=' + part, {
+      // STEP 1: Always set the schedule using status-only request (exactly like the old working code).
+      // Sending snippet+status together causes YouTube to run full snippet validation,
+      // which can incorrectly reject the publishAt even when the timestamp is valid.
+      console.log('[apiSet] publishAt sent:', publishAt);
+      var statusBody = { id: videoId, status: { privacyStatus: 'private', publishAt: publishAt } };
+      var r1 = await fetch('https://www.googleapis.com/youtube/v3/videos?part=status', {
         method: 'PUT', headers: { Authorization: 'Bearer ' + A.token, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+        body: JSON.stringify(statusBody)
       });
-      var d = await r.json();
-      if (d.error) {
-        console.error('YouTube API Error:', d.error);
-        if (d.error.code === 403 || (d.error.message && d.error.message.toLowerCase().includes('quota'))) {
+      var d1 = await r1.json();
+      if (d1.error) {
+        console.error('YouTube API Error (status):', d1.error);
+        if (d1.error.code === 403 || (d1.error.message && d1.error.message.toLowerCase().includes('quota'))) {
           throw new Error('403_QUOTA');
         }
-        if (d.error.errors && d.error.errors[0] && d.error.errors[0].reason === 'invalidPublishAt') {
+        if (d1.error.errors && d1.error.errors[0] && d1.error.errors[0].reason === 'invalidPublishAt') {
           throw new Error('invalidPublishAt: Timestamp yang dikirim: ' + publishAt + '\n\nKemungkinan penyebab:\n1. Video berstatus Publik (tidak bisa dijadwal ulang).\n2. Video sudah memiliki jadwal yang sama.\n3. Jam komputer tidak sinkron dengan internet.');
         }
-        throw new Error(JSON.stringify(d.error, null, 2));
+        throw new Error(JSON.stringify(d1.error, null, 2));
+      }
+
+      // STEP 2: If metadata provided, update snippet in a separate request.
+      if (metadata && (metadata.title || metadata.description || (metadata.tags && metadata.tags.length))) {
+        var snippetBody = {
+          id: videoId,
+          snippet: {
+            categoryId: categoryId || '22',
+            title: metadata.title || '',
+            description: metadata.description || '',
+            tags: metadata.tags || []
+          }
+        };
+        var r2 = await fetch('https://www.googleapis.com/youtube/v3/videos?part=snippet', {
+          method: 'PUT', headers: { Authorization: 'Bearer ' + A.token, 'Content-Type': 'application/json' },
+          body: JSON.stringify(snippetBody)
+        });
+        var d2 = await r2.json();
+        if (d2.error) {
+          console.error('YouTube API Error (snippet):', d2.error);
+          if (d2.error.code === 403 || (d2.error.message && d2.error.message.toLowerCase().includes('quota'))) {
+            throw new Error('403_QUOTA');
+          }
+          throw new Error(JSON.stringify(d2.error, null, 2));
+        }
       }
     }
     async function apiUnset(videoId) {
