@@ -1623,7 +1623,11 @@
       }
     }
     async function apiSet(videoId, publishAt, metadata, categoryId) {
-      var body = { id: videoId, status: { privacyStatus: 'private', publishAt: publishAt } };
+      // NOTE: When scheduling (publishAt set), do NOT include privacyStatus.
+      // YouTube infers the scheduled-private state from publishAt alone.
+      // Sending privacyStatus:'private' alongside publishAt causes invalidPublishAt on some videos.
+      var statusObj = publishAt ? { publishAt: publishAt } : { privacyStatus: 'private' };
+      var body = { id: videoId, status: statusObj };
       var part = 'status';
       if (metadata) {
         part += ',snippet';
@@ -1634,6 +1638,7 @@
           tags: metadata.tags
         };
       }
+      console.log('[apiSet] Request body:', JSON.stringify(body, null, 2));
       var r = await fetch('https://www.googleapis.com/youtube/v3/videos?part=' + part, {
         method: 'PUT', headers: { Authorization: 'Bearer ' + A.token, 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -1645,7 +1650,7 @@
           throw new Error('403_QUOTA');
         }
         if (d.error.errors && d.error.errors[0] && d.error.errors[0].reason === 'invalidPublishAt') {
-          throw new Error('invalidPublishAt: Waktu jadwal ditolak oleh YouTube. Pastikan:\n1. Video belum pernah di-publish (harus Private/Draft).\n2. Jam di laptop/komputer kamu sudah sinkron dengan internet.\n3. Waktu jadwal minimal 15 menit dari sekarang.');
+          throw new Error('invalidPublishAt: Timestamp yang dikirim: ' + publishAt + '\n\nKemungkinan penyebab:\n1. Video berstatus Publik (tidak bisa dijadwal ulang).\n2. Video sudah memiliki jadwal yang sama.\n3. Jam komputer tidak sinkron dengan internet.');
         }
         throw new Error(JSON.stringify(d.error, null, 2));
       }
