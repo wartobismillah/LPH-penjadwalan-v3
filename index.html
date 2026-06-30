@@ -1285,33 +1285,51 @@ function saveBulkValues(){
   if(A.bulk.mode==='custom'){
     A.bulk.selected.forEach(function(id){var v=val('bc-'+id);if(v)A.bulk.customDates[id]=v;});
   }
+  if (!confirm('Apakah kamu yakin ingin menerapkan jadwal massal ini ke YouTube?')) return;
   applyBulk();
 }
 
 /* Calendar tab */
 function handleCalClick(y, m, d) {
   if(!A.calMode) return;
+  
+  var time = A.calTime || '10:00';
+  var dateStr = y + '-' + pad(m+1) + '-' + pad(d);
+  var utcPub = localToUTC(dateStr, time);
+  
+  if (new Date(utcPub).getTime() < Date.now()) {
+    toast('The scheduled time is in the past!', 'err');
+    return;
+  }
+  
   var drafts = getDrafts().filter(function(v){ return !A.scheduled[v.id] && !A.calScheduled[v.id]; });
   if(drafts.length === 0) { toast('Tidak ada draft tersisa!', 'inf'); return; }
   var v = drafts[0];
-  var dateStr = y + '-' + pad(m+1) + '-' + pad(d);
-  var time = A.calTime || '10:00';
-  A.calScheduled[v.id] = localToUTC(dateStr, time);
+  
+  A.calScheduled[v.id] = utcPub;
   render();
 }
 
 async function saveCalScheduled() {
   var ids = Object.keys(A.calScheduled);
   if(ids.length === 0) return;
+  if (!confirm('Apakah kamu yakin ingin menyimpan ' + ids.length + ' jadwal ini ke YouTube?')) return;
   var btn = $('cal-save-btn'); if(btn) { btn.disabled = true; btn.textContent = 'Menyimpan...'; }
   var ok = 0, fail = 0;
   for(var i=0; i<ids.length; i++) {
     var vid = ids[i];
     var pub = A.calScheduled[vid];
     var vObj = A.videos.find(function(x){return x.id === vid});
+    
+    var metadata = {
+      title: getTitle(vObj),
+      description: (vObj && vObj.snippet && vObj.snippet.description) || '',
+      tags: (vObj && vObj.snippet && vObj.snippet.tags) || []
+    };
     var origCatId = (vObj && vObj.snippet && vObj.snippet.categoryId) ? vObj.snippet.categoryId : '22';
+    
     try {
-      await apiSet(vid, pub, null, origCatId);
+      await apiSet(vid, pub, metadata, origCatId);
       A.scheduled[vid] = pub;
       ok++;
     } catch(e) {
@@ -1319,6 +1337,7 @@ async function saveCalScheduled() {
         alert('Process stopped! API Quota Exceeded. Please switch the Client ID and log in again to continue.');
         break;
       }
+      toast('Error: ' + e.message, 'err');
       fail++;
     }
   }
