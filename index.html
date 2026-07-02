@@ -13,8 +13,8 @@
     var CONFIG = {
       // ── Client ID: bisa 1 atau lebih sebagai cadangan ──────────
       clientIds: [
-        '997053798419-8d2am8gqkr4cg7mrpqjnjdsmlafqfhpp.apps.googleusercontent.com',
         '842181485815-9bvac0915sfkco1sae7tk2r9j8dgniko.apps.googleusercontent.com',
+        '997053798419-8d2am8gqkr4cg7mrpqjnjdsmlafqfhpp.apps.googleusercontent.com',
         '306332781906-3c8pmafmtatac4457sepro8ebnsqq8ce.apps.googleusercontent.com',
         '854334250220-h1vepbnct1p9obq6d4pvq9f76rdfo8j0.apps.googleusercontent.com',   // ← Client ID #1 (utama)
         '751998485199-s1ddtuuhuaa36368pn8v05lmk0j5qbnt.apps.googleusercontent.com',   // ← Client ID #2 (cadangan, boleh dikosongkan)
@@ -1454,6 +1454,7 @@
       step: 'setup', channels: lsCh(), active: null, token: '',
       cidIdx: 0,          // index ke getClientIds() yang sedang dipakai
       tokenExpiry: 0,     // timestamp ms kapan token expired
+      pendingTask: null,  // { type:'bulk'|'cal', remaining, ok, fail, titleLines, descText, tagsArr, startIndex, hasMeta } — snapshot antrean yang terhenti karena 403_QUOTA
       videos: [], scheduled: {},
       calScheduled: {},
       filter: 'all', tab: 'list',
@@ -1564,11 +1565,18 @@
       try {
         await loadGIS();
         var ids = getClientIds();
-        // Ch may have own cid (from config), otherwise use rotating cidIdx
-        var cid = ch.cid;
-        if (!cid) {
-          if (cidIdxOverride !== undefined) A.cidIdx = cidIdxOverride;
+        var cid;
+        // FIX: cidIdxOverride must win over ch.cid. Previously `if (!cid)` only
+        // consulted cidIdxOverride when ch.cid was empty — but ch.cid is almost
+        // always already populated from localStorage, so rotateClientId()'s
+        // override was silently ignored and the CID never actually switched.
+        if (cidIdxOverride !== undefined) {
+          A.cidIdx = cidIdxOverride;
           cid = ids[A.cidIdx % Math.max(ids.length, 1)] || '';
+          ch.cid = cid;          // persist the new CID onto the channel object
+          saveCh();              // persist to localStorage (no-op for fromConfig channels)
+        } else {
+          cid = ch.cid || ids[A.cidIdx % Math.max(ids.length, 1)] || '';
         }
         if (!cid) { toast('Client ID belum diisi di CONFIG', 'err'); return; }
         google.accounts.oauth2.initTokenClient({
@@ -1589,13 +1597,26 @@
             }
             A.token = r.access_token;
             A.tokenExpiry = Date.now() + (r.expires_in || 3600) * 1000;
+
+            // Auto-resume: if this sign-in happened because a 403_QUOTA pause
+            // auto-rotated the CID mid-task, don't re-run pickChannel/fetchVideos
+            // (that would burn more quota) — just plug the fresh token into the
+            // paused queue and continue exactly where it left off.
+            if (A.pendingTask) {
+              A.active = ch;
+              toast('Melanjutkan sisa antrean...', 'inf');
+              render();
+              await resumePendingTask();
+              return;
+            }
+
             A.active = ch; A.scheduled = loadSched(ch); A.hidden = loadHidden(ch);
             A.step = 'loading'; render(); await pickChannel();
           }
         }).requestAccessToken({ prompt: 'select_account' });
       } catch (e) { toast('Error: ' + e.message, 'err'); }
     }
-    // Try next client ID manually
+    // Try next client ID manually (also invoked automatically on 403_QUOTA pause)
     function rotateClientId() {
       var ids = getClientIds();
       if (ids.length <= 1) { toast('Hanya ada 1 Client ID di config', 'inf'); return; }
@@ -1844,6 +1865,147 @@
       return result;
     }
 
+    /* ─ Pause & Auto-Resume queue runners (shared by Bulk and Calendar saves) ─
+       Both loops are refactored into resumable "queue runner" functions so that
+       a 403_QUOTA mid-loop can snapshot exactly what's left, pause, auto-rotate
+       the Client ID, and pick the same loop back up with the new token — instead
+       of dropping the rest of the batch on the user via alert()+break. */
+
+    async function runBulkQueue(items, startOk, startFail, titleLines, descText, tagsArr, offset) {
+      offset = offset || 0;
+      var btn = $('bulk-apply');
+      var ok = startOk, fail = startFail;
+      var total = startOk + startFail + items.length;
+
+      for (var localI = 0; localI < items.length; localI++) {
+        var i = offset + localI; // absolute index into the ORIGINAL preview, for titleLines alignment
+        var vid = items[localI].id;
+        var pub = items[localI].publishAt;
+        var vObj = A.videos.find(function (x) { return x.id === vid; });
+        var newTitle = titleLines[i] || getTitle(vObj);
+        var metadata = {};
+        var hasMeta = false;
+
+        if (A.bulk.titles || A.bulk.desc || A.bulk.tags) {
+          metadata.title = newTitle;
+          metadata.description = A.bulk.desc ? descText : ((vObj.snippet && vObj.snippet.description) || '');
+          metadata.tags = A.bulk.tags ? tagsArr : ((vObj.snippet && vObj.snippet.tags) || []);
+          hasMeta = true;
+        }
+        var origCatId = (vObj.snippet && vObj.snippet.categoryId) ? vObj.snippet.categoryId : '22';
+
+        try {
+          await apiSet(vid, pub, hasMeta ? metadata : null, origCatId);
+          A.scheduled[vid] = pub;
+          ok++;
+          if (btn) btn.textContent = 'Menyimpan ' + ok + '/' + total + '...';
+          var sIdx = A.bulk.selected.indexOf(vid);
+          if (sIdx > -1) A.bulk.selected.splice(sIdx, 1);
+        } catch (e) {
+          if (e.message === '403_QUOTA' || (e.message && e.message.toLowerCase().includes('quota'))) {
+            // PAUSE: persist progress made so far, stash the remaining queue,
+            // then auto-trigger a CID rotation + re-login instead of alert()+break.
+            saveSched();
+            A.pendingTask = {
+              type: 'bulk',
+              remaining: items.slice(localI), // includes the item that just failed, so it gets retried
+              titleLines: titleLines, descText: descText, tagsArr: tagsArr,
+              ok: ok, fail: fail, startIndex: i
+            };
+            toast('Quota API habis. Mengganti Client ID otomatis & melanjutkan...', 'inf');
+            if (btn) { btn.textContent = 'Menunggu Client ID baru...'; }
+            rotateClientId();
+            return; // pause here — resumePendingTask() will pick the loop back up
+          }
+          showErrorModal(e.message);
+          fail++;
+        }
+      }
+
+      // Reached only on a genuine finish (first pass with no interruption, or a
+      // resumed tail that completed without hitting quota again).
+      saveSched();
+      if (fail === 0) toast('✓ ' + ok + ' video berhasil dijadwalkan!', 'ok');
+      else toast(ok + ' berhasil, ' + fail + ' gagal', 'inf');
+      if (btn) { btn.disabled = false; btn.textContent = 'Terapkan Jadwal'; }
+      render();
+    }
+
+    async function runCalQueue(ids, startOk, startFail, hasMeta, titleLines, descText, tagsArr, offset) {
+      offset = offset || 0;
+      var btn = $('cal-save-btn');
+      var ok = startOk, fail = startFail;
+      var total = startOk + startFail + ids.length;
+
+      for (var localI = 0; localI < ids.length; localI++) {
+        var i = offset + localI;
+        var vid = ids[localI];
+        var pub = A.calScheduled[vid];
+        var vObj = A.videos.find(function (x) { return x.id === vid; });
+        var newTitle = (hasMeta && titleLines[i]) ? titleLines[i] : getTitle(vObj);
+        var metadata;
+        if (hasMeta) {
+          metadata = {
+            title: newTitle,
+            description: descText || ((vObj && vObj.snippet && vObj.snippet.description) || ''),
+            tags: tagsArr.length ? tagsArr : ((vObj && vObj.snippet && vObj.snippet.tags) || [])
+          };
+        } else {
+          metadata = {
+            title: getTitle(vObj),
+            description: (vObj && vObj.snippet && vObj.snippet.description) || '',
+            tags: (vObj && vObj.snippet && vObj.snippet.tags) || []
+          };
+        }
+        var origCatId = (vObj && vObj.snippet && vObj.snippet.categoryId) ? vObj.snippet.categoryId : '22';
+
+        try {
+          await apiSet(vid, pub, metadata, origCatId);
+          A.scheduled[vid] = pub;
+          ok++;
+          if (btn) btn.textContent = 'Menyimpan ' + ok + '/' + total + '...';
+        } catch (e) {
+          if (e.message === '403_QUOTA' || (e.message && e.message.toLowerCase().includes('quota'))) {
+            saveSched();
+            A.pendingTask = {
+              type: 'cal',
+              remaining: ids.slice(localI),
+              hasMeta: hasMeta, titleLines: titleLines, descText: descText, tagsArr: tagsArr,
+              ok: ok, fail: fail, startIndex: i
+            };
+            toast('Quota API habis. Mengganti Client ID otomatis & melanjutkan...', 'inf');
+            if (btn) { btn.textContent = 'Menunggu Client ID baru...'; }
+            rotateClientId();
+            return;
+          }
+          showErrorModal(e.message);
+          fail++;
+        }
+      }
+
+      saveSched();
+      A.calScheduled = {};
+      A.calMeta = { titles: '', desc: '', tags: '' };
+      if (fail === 0) toast('✓ ' + ok + ' jadwal disimpan!', 'ok');
+      else toast(ok + ' berhasil, ' + fail + ' gagal', 'inf');
+      if (btn) { btn.disabled = false; btn.textContent = '💾 Simpan ke YT'; }
+      render();
+    }
+
+    // Called from signIn()'s callback once a fresh token is acquired and
+    // A.pendingTask is present. Consumes the snapshot and re-enters whichever
+    // queue runner was interrupted, at the exact index it stopped at.
+    async function resumePendingTask() {
+      if (!A.pendingTask) return;
+      var task = A.pendingTask;
+      A.pendingTask = null; // clear immediately so this can't double-fire
+      if (task.type === 'bulk') {
+        await runBulkQueue(task.remaining, task.ok, task.fail, task.titleLines, task.descText, task.tagsArr, task.startIndex);
+      } else if (task.type === 'cal') {
+        await runCalQueue(task.remaining, task.ok, task.fail, task.hasMeta, task.titleLines, task.descText, task.tagsArr, task.startIndex);
+      }
+    }
+
     async function applyBulk() {
       // read current form values
       A.bulk.time = val('b-time') || A.bulk.time;
@@ -1865,45 +2027,9 @@
       var titleLines = (A.bulk.titles || '').split('\n').map(function (x) { return x.trim() }).filter(Boolean);
       var descText = A.bulk.desc || '';
       var tagsArr = (A.bulk.tags || '').split(',').map(function (x) { return x.trim() }).filter(Boolean);
-      var ok = 0, fail = 0;
 
-      for (var i = 0; i < preview.length; i++) {
-        var vid = preview[i].id;
-        var pub = preview[i].publishAt;
-        var vObj = A.videos.find(function (x) { return x.id === vid });
-        var newTitle = titleLines[i] || getTitle(vObj);
-        var metadata = {};
-        var hasMeta = false;
-
-        if (A.bulk.titles || A.bulk.desc || A.bulk.tags) {
-          metadata.title = newTitle;
-          metadata.description = A.bulk.desc ? descText : ((vObj.snippet && vObj.snippet.description) || '');
-          metadata.tags = A.bulk.tags ? tagsArr : ((vObj.snippet && vObj.snippet.tags) || []);
-          hasMeta = true;
-        }
-        var origCatId = (vObj.snippet && vObj.snippet.categoryId) ? vObj.snippet.categoryId : '22';
-
-        try {
-          await apiSet(vid, pub, hasMeta ? metadata : null, origCatId);
-          A.scheduled[vid] = pub;
-          ok++;
-          if (btn) btn.textContent = 'Menyimpan ' + ok + '/' + preview.length + '...';
-          var sIdx = A.bulk.selected.indexOf(vid);
-          if (sIdx > -1) A.bulk.selected.splice(sIdx, 1);
-        } catch (e) {
-          if (e.message === '403_QUOTA' || (e.message && e.message.toLowerCase().includes('quota'))) {
-            alert('Process stopped! API Quota Exceeded. Please switch the Client ID and log in again to continue.');
-            break;
-          }
-          showErrorModal(e.message);
-          fail++;
-        }
-      }
-      saveSched();
-      if (fail === 0) toast('✓ ' + ok + ' video berhasil dijadwalkan!', 'ok');
-      else toast(ok + ' berhasil, ' + fail + ' gagal', 'inf');
-      if (btn) { btn.disabled = false; btn.textContent = 'Terapkan Jadwal'; }
-      render();
+      // Delegate to the resumable queue runner (see helpers above).
+      await runBulkQueue(preview, 0, 0, titleLines, descText, tagsArr, 0);
     }
 
     /* ─ Unified staging & execution for both Bulk and Calendar saves ─ */
@@ -2626,48 +2752,9 @@
       var tagsArr   = (A.calMeta.tags || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
       var hasMeta   = !!(A.calMeta.titles || A.calMeta.desc || A.calMeta.tags);
       var btn = $('cal-save-btn'); if (btn) { btn.disabled = true; btn.textContent = 'Menyimpan...'; }
-      var ok = 0, fail = 0;
-      for (var i = 0; i < ids.length; i++) {
-        var vid  = ids[i];
-        var pub  = A.calScheduled[vid];
-        var vObj = A.videos.find(function (x) { return x.id === vid; });
-        var newTitle = (hasMeta && titleLines[i]) ? titleLines[i] : getTitle(vObj);
-        var metadata;
-        if (hasMeta) {
-          metadata = {
-            title: newTitle,
-            description: descText || ((vObj && vObj.snippet && vObj.snippet.description) || ''),
-            tags: tagsArr.length ? tagsArr : ((vObj && vObj.snippet && vObj.snippet.tags) || [])
-          };
-        } else {
-          metadata = {
-            title: getTitle(vObj),
-            description: (vObj && vObj.snippet && vObj.snippet.description) || '',
-            tags: (vObj && vObj.snippet && vObj.snippet.tags) || []
-          };
-        }
-        var origCatId = (vObj && vObj.snippet && vObj.snippet.categoryId) ? vObj.snippet.categoryId : '22';
-        try {
-          await apiSet(vid, pub, metadata, origCatId);
-          A.scheduled[vid] = pub;
-          ok++;
-          if (btn) btn.textContent = 'Menyimpan ' + ok + '/' + ids.length + '...';
-        } catch (e) {
-          if (e.message === '403_QUOTA' || (e.message && e.message.toLowerCase().includes('quota'))) {
-            alert('Process stopped! API Quota Exceeded. Please switch the Client ID and log in again to continue.');
-            break;
-          }
-          showErrorModal(e.message);
-          fail++;
-        }
-      }
-      saveSched();
-      A.calScheduled = {};
-      A.calMeta = { titles: '', desc: '', tags: '' };
-      if (fail === 0) toast('\u2713 ' + ok + ' jadwal disimpan!', 'ok');
-      else toast(ok + ' berhasil, ' + fail + ' gagal', 'inf');
-      if (btn) { btn.disabled = false; btn.textContent = '\ud83d\udcbe Simpan ke YT'; }
-      render();
+
+      // Delegate to the resumable queue runner (see helpers above applyBulk()).
+      await runCalQueue(ids, 0, 0, hasMeta, titleLines, descText, tagsArr, 0);
     }
 
     function renderCalendar() {
