@@ -1036,6 +1036,7 @@
     }
 
     .cal-cell {
+      min-width: 0;
       min-height: 68px;
       padding: 4px 5px;
       border-radius: var(--r2);
@@ -1456,7 +1457,7 @@
       tokenExpiry: 0,     // timestamp ms kapan token expired
       pendingTask: null,  // { type:'bulk'|'cal', remaining, ok, fail, titleLines, descText, tagsArr, startIndex, hasMeta } — snapshot antrean yang terhenti karena 403_QUOTA
       videos: [], scheduled: {},
-      calScheduled: {},
+      calScheduled: {}, calHistory: [], searchQuery: '',
       filter: 'all', tab: 'list',
       openPanel: null,
       modal: null,
@@ -1505,6 +1506,71 @@
     function saveHidden() { if (!A.active) return; localStorage.setItem('yt_hid_' + A.active.id, JSON.stringify(A.hidden)) }
     function loadHidden(ch) { try { return JSON.parse(localStorage.getItem('yt_hid_' + ch.id) || '{}') } catch (e) { return {} } }
     function loadSched(ch) { try { return JSON.parse(localStorage.getItem('yt_sc_' + ch.id) || '{}') } catch (e) { return {} } }
+    function persistDraftState() {
+      try {
+        var state = {
+          bulk: A.bulk,
+          calScheduled: A.calScheduled,
+          calHistory: A.calHistory || [],
+          calMeta: A.calMeta
+        };
+        sessionStorage.setItem('yt_draft_state', JSON.stringify(state));
+      } catch (e) {
+        console.warn('Failed to persist draft state', e);
+      }
+    }
+    function renderSearchBar() {
+      var val = esc(A.searchQuery || '');
+      var h = '<div style="position:relative;margin-bottom:10px;display:flex;align-items:center;">';
+      h += '<input type="text" placeholder="🔍 Cari judul video..." value="' + val + '" oninput="A.searchQuery=this.value;render()" style="width:100%;padding:6px 26px 6px 10px;font-size:12px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text);">';
+      if (A.searchQuery) {
+        h += '<button onclick="A.searchQuery=\'\';render()" style="position:absolute;right:6px;background:none;border:none;color:var(--t3);cursor:pointer;font-size:16px;padding:0 6px;line-height:1;" title="Hapus pencarian">×</button>';
+      }
+      h += '</div>';
+      return h;
+    }
+    function getCounterHtml(cntId, val, maxLen, isMultiLine) {
+      var len = 0;
+      if (isMultiLine && val) {
+        var lines = val.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          var l = lines[i].trim().length;
+          if (l > len) len = l;
+        }
+      } else {
+        len = val ? val.length : 0;
+      }
+      var color = len > maxLen ? '#DC2626' : 'var(--t3)';
+      var weight = len > maxLen ? 'font-weight:700;' : '';
+      return '<div id="' + cntId + '" style="font-size:11px;color:' + color + ';' + weight + 'text-align:right;margin-top:3px;">' + len + '/' + maxLen + '</div>';
+    }
+    function updateCharCounter(elemId, val, maxLen, isMultiLine) {
+      var el = $(elemId);
+      if (!el) return;
+      var len = 0;
+      if (isMultiLine && val) {
+        var lines = val.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          var l = lines[i].trim().length;
+          if (l > len) len = l;
+        }
+      } else {
+        len = val ? val.length : 0;
+      }
+      el.textContent = len + '/' + maxLen;
+      el.style.color = len > maxLen ? '#DC2626' : 'var(--t3)';
+      el.style.fontWeight = len > maxLen ? '700' : '400';
+    }
+    function undoCal() {
+      if (!A.calHistory || !A.calHistory.length) return;
+      var videoId = A.calHistory.pop();
+      if (videoId) {
+        delete A.calScheduled[videoId];
+        toast('Jadwal dibatalkan', 'inf');
+        persistDraftState();
+        render();
+      }
+    }
     function tzOffset() { return -new Date().getTimezoneOffset() / 60 }
     function tzLabel() {
       var o = tzOffset();
@@ -1925,6 +1991,7 @@
       // Reached only on a genuine finish (first pass with no interruption, or a
       // resumed tail that completed without hitting quota again).
       saveSched();
+      persistDraftState();
       if (fail === 0) toast('✓ ' + ok + ' video berhasil dijadwalkan!', 'ok');
       else toast(ok + ' berhasil, ' + fail + ' gagal', 'inf');
       if (btn) { btn.disabled = false; btn.textContent = 'Terapkan Jadwal'; }
@@ -1985,7 +2052,9 @@
 
       saveSched();
       A.calScheduled = {};
+      A.calHistory = [];
       A.calMeta = { titles: '', desc: '', tags: '' };
+      persistDraftState();
       if (fail === 0) toast('✓ ' + ok + ' jadwal disimpan!', 'ok');
       else toast(ok + ' berhasil, ' + fail + ' gagal', 'inf');
       if (btn) { btn.disabled = false; btn.textContent = '💾 Simpan ke YT'; }
@@ -2093,7 +2162,13 @@
       }
 
       // Step 3: Show confirmation modal
-      A.previewData = { source: source, rows: previewItems, hasError: hasError };
+      var pubSet = new Set(), hasCollision = false;
+      for (var pi = 0; pi < previewItems.length; pi++) {
+        var pt = previewItems[pi].publishAt;
+        if (pubSet.has(pt)) { hasCollision = true; break; }
+        pubSet.add(pt);
+      }
+      A.previewData = { source: source, rows: previewItems, hasError: hasError, hasCollision: hasCollision };
       A.modal = 'confirm_save';
       render();
     }
@@ -2114,32 +2189,34 @@
       var idx = A.bulk.selected.indexOf(id);
       if (idx > -1) A.bulk.selected.splice(idx, 1);
       else A.bulk.selected.push(id);
+      persistDraftState();
       render();
     }
     function selectAllBulk() {
       var unscheduled = getDrafts().filter(function (v) { return !A.scheduled[v.id] });
       if (A.bulk.selected.length === unscheduled.length && unscheduled.length > 0) A.bulk.selected = [];
       else A.bulk.selected = unscheduled.map(function (v) { return v.id });
+      persistDraftState();
       render();
     }
     function moveUp(id) {
       var arr = A.bulk.selected, i = arr.indexOf(id);
-      if (i > 0) { arr.splice(i, 1); arr.splice(i - 1, 0, id); } render();
+      if (i > 0) { arr.splice(i, 1); arr.splice(i - 1, 0, id); } persistDraftState(); render();
     }
     function moveDown(id) {
       var arr = A.bulk.selected, i = arr.indexOf(id);
-      if (i < arr.length - 1) { arr.splice(i, 1); arr.splice(i + 1, 0, id); } render();
+      if (i < arr.length - 1) { arr.splice(i, 1); arr.splice(i + 1, 0, id); } persistDraftState(); render();
     }
     function setInterval2(n) {
       // save current form values before re-render
       var bs = val('b-start'), bt = val('b-time');
       if (bs) A.bulk.startDate = bs; if (bt) A.bulk.time = bt;
-      A.bulk.interval = n; render();
+      A.bulk.interval = n; persistDraftState(); render();
     }
     function setMode(m) {
       var bs = val('b-start'), bt = val('b-time');
       if (bs) A.bulk.startDate = bs; if (bt) A.bulk.time = bt;
-      A.bulk.mode = m; render();
+      A.bulk.mode = m; persistDraftState(); render();
     }
 
     /* ─ Misc ─ */
@@ -2604,22 +2681,22 @@
         '<div class="mode-opt-text"><strong>🗓 Pilih Tanggal Sendiri</strong><span>Tentukan tanggal berbeda untuk tiap video</span></div></label>';
       left += '</div>';
       if (b.mode === 'interval') {
-        left += '<div class="fg"><label>Tanggal Mulai</label><input type="date" id="b-start" min="' + today() + '" value="' + esc(b.startDate || tomorrow()) + '" oninput="A.bulk.startDate=this.value;render()"></div>';
+        left += '<div class="fg"><label>Tanggal Mulai</label><input type="date" id="b-start" min="' + today() + '" value="' + esc(b.startDate || tomorrow()) + '" oninput="A.bulk.startDate=this.value;persistDraftState();render()"></div>';
         left += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--t3);margin-bottom:7px">Interval</div>';
         left += '<div class="interval-row">';
         [1, 2, 3, 7].forEach(function (n) {
           left += '<button class="interval-btn' + (b.interval === n ? ' sel' : '') + '" onclick="setInterval2(' + n + ')">' + (n === 1 ? 'Tiap Hari' : n === 7 ? 'Tiap Minggu' : n + ' Hari Sekali') + '</button>';
         });
-        left += '<div style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--t2)">Custom:<input class="custom-n" type="number" min="1" max="365" value="' + b.customN + '" oninput="A.bulk.customN=parseInt(this.value)||1" id="b-custn">' +
+        left += '<div style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--t2)">Custom:<input class="custom-n" type="number" min="1" max="365" value="' + b.customN + '" oninput="A.bulk.customN=parseInt(this.value)||1;persistDraftState();" id="b-custn">' +
           '<button class="btn btn-xs" onclick="setInterval2(parseInt(val(\'b-custn\'))||1)">OK</button></div>';
         left += '</div>';
       }
-      left += '<div class="fg" style="margin-top:12px"><label>Jam Publish — ' + tzLabel() + ' (waktu lokal)</label><input type="time" id="b-time" value="' + esc(b.time) + '" oninput="A.bulk.time=this.value"></div>';
+      left += '<div class="fg" style="margin-top:12px"><label>Jam Publish — ' + tzLabel() + ' (waktu lokal)</label><input type="time" id="b-time" value="' + esc(b.time) + '" oninput="A.bulk.time=this.value;persistDraftState();"></div>';
       left += '<div style="margin-top:16px;padding-top:16px;border-top:1px dashed var(--border2)">';
       left += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--t3);margin-bottom:8px">📝 Update Metadata Massal (Opsional)</div>';
-      left += '<div class="fg"><label>Judul (1 Baris = 1 Video)</label><textarea id="b-titles" rows="4" placeholder="Judul Video 1\\nJudul Video 2" style="width:100%;padding:8px;font-size:13px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text)" oninput="A.bulk.titles=this.value">' + esc(b.titles || '') + '</textarea></div>';
-      left += '<div class="fg"><label>Deskripsi (Untuk Semua Video)</label><textarea id="b-desc" rows="3" style="width:100%;padding:8px;font-size:13px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text)" oninput="A.bulk.desc=this.value">' + esc(b.desc || '') + '</textarea></div>';
-      left += '<div class="fg"><label>Tags (Pisahkan koma)</label><input type="text" id="b-tags" placeholder="tag1, tag 2" style="width:100%;padding:8px;font-size:13px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text)" value="' + esc(b.tags || '') + '" oninput="A.bulk.tags=this.value"></div>';
+      left += '<div class="fg"><label>Judul (1 Baris = 1 Video)</label><textarea id="b-titles" rows="4" placeholder="Judul Video 1\\nJudul Video 2" style="width:100%;padding:8px;font-size:13px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text)" oninput="A.bulk.titles=this.value;persistDraftState();updateCharCounter(\'b-titles-cnt\',this.value,100,true);">' + esc(b.titles || '') + '</textarea>' + getCounterHtml('b-titles-cnt', b.titles, 100, true) + '</div>';
+      left += '<div class="fg"><label>Deskripsi (Untuk Semua Video)</label><textarea id="b-desc" rows="3" style="width:100%;padding:8px;font-size:13px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text)" oninput="A.bulk.desc=this.value;persistDraftState();updateCharCounter(\'b-desc-cnt\',this.value,5000,false);">' + esc(b.desc || '') + '</textarea>' + getCounterHtml('b-desc-cnt', b.desc, 5000, false) + '</div>';
+      left += '<div class="fg"><label>Tags (Pisahkan koma)</label><input type="text" id="b-tags" placeholder="tag1, tag 2" style="width:100%;padding:8px;font-size:13px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text)" value="' + esc(b.tags || '') + '" oninput="A.bulk.tags=this.value;persistDraftState();updateCharCounter(\'b-tags-cnt\',this.value,500,false);">' + getCounterHtml('b-tags-cnt', b.tags, 500, false) + '</div>';
       left += '</div>';
       left += '</div></div>';
 
@@ -2635,6 +2712,7 @@
           '<p style="font-size:12px;color:var(--t3);margin-top:6px">Lihat tab <b>Sudah Terjadwal</b> untuk kelola jadwal yang ada.</p></div>';
       } else {
         right += '<div class="info-blue" style="font-size:11px;margin-bottom:8px">💡 Hanya video <b>belum dijadwalkan</b> yang tampil di sini. Urutan = urutan tanggal publish. Atur dengan ↑↓.</div>';
+        right += renderSearchBar();
         right += '<div class="sel-list">';
         var selSet = new Set(b.selected);
         // Only show unscheduled videos
@@ -2642,24 +2720,30 @@
         var orderedList = orderedSel.map(function (id) { return A.videos.find(function (v) { return v.id === id }) }).filter(Boolean);
         var unsel = unscheduled.filter(function (v) { return !selSet.has(v.id) });
         var allInOrder = orderedList.concat(unsel);
+        var q = (A.searchQuery || '').toLowerCase();
+        var displayList = q ? allInOrder.filter(function (v) { return getTitle(v).toLowerCase().includes(q); }) : allInOrder;
 
-        allInOrder.forEach(function (v) {
-          var checked = selSet.has(v.id);
-          var thumb = getThumb(v), title = getTitle(v);
-          var posInSel = b.selected.indexOf(v.id);
-          right += '<div class="sel-row' + (checked ? ' checked' : '') + '" onclick="toggleBulkSel(\'' + v.id + '\')">';
-          right += '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onclick="event.stopPropagation();toggleBulkSel(\'' + v.id + '\')">';
-          right += (thumb ? '<img class="sthumb" src="' + esc(thumb.url) + '" alt="" loading="lazy">' : '<div class="sthumb-ph">▶</div>');
-          right += '<span class="stitle" title="' + esc(title) + '">' + esc(title) + '</span>';
-          if (checked) {
-            right += '<span style="font-size:10px;font-weight:700;color:var(--red);min-width:16px;text-align:center">#' + (posInSel + 1) + '</span>';
-            right += '<div class="reorder" onclick="event.stopPropagation()">' +
-              '<button onclick="moveUp(\'' + v.id + '\')" ' + (posInSel === 0 ? 'disabled' : '') + '>▲</button>' +
-              '<button onclick="moveDown(\'' + v.id + '\')" ' + (posInSel === b.selected.length - 1 ? 'disabled' : '') + '>▼</button>' +
-              '</div>';
-          }
-          right += '</div>';
-        });
+        if (!displayList.length) {
+          right += '<div style="padding:1rem;text-align:center;color:var(--t3);font-size:12px;">Tidak ada video yang cocok</div>';
+        } else {
+          displayList.forEach(function (v) {
+            var checked = selSet.has(v.id);
+            var thumb = getThumb(v), title = getTitle(v);
+            var posInSel = b.selected.indexOf(v.id);
+            right += '<div class="sel-row' + (checked ? ' checked' : '') + '" onclick="toggleBulkSel(\'' + v.id + '\')">';
+            right += '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onclick="event.stopPropagation();toggleBulkSel(\'' + v.id + '\')">';
+            right += (thumb ? '<img class="sthumb" src="' + esc(thumb.url) + '" alt="" loading="lazy">' : '<div class="sthumb-ph">▶</div>');
+            right += '<span class="stitle" title="' + esc(title) + '">' + esc(title) + '</span>';
+            if (checked) {
+              right += '<span style="font-size:10px;font-weight:700;color:var(--red);min-width:16px;text-align:center">#' + (posInSel + 1) + '</span>';
+              right += '<div class="reorder" onclick="event.stopPropagation()">' +
+                '<button onclick="moveUp(\'' + v.id + '\')" ' + (posInSel === 0 ? 'disabled' : '') + '>▲</button>' +
+                '<button onclick="moveDown(\'' + v.id + '\')" ' + (posInSel === b.selected.length - 1 ? 'disabled' : '') + '>▼</button>' +
+                '</div>';
+            }
+            right += '</div>';
+          });
+        }
         right += '</div>';
       }
       right += '</div></div>';
@@ -2741,6 +2825,9 @@
       var v = drafts[0];
 
       A.calScheduled[v.id] = utcPub;
+      if (!A.calHistory) A.calHistory = [];
+      A.calHistory.push(v.id);
+      persistDraftState();
       render();
     }
 
@@ -2817,22 +2904,28 @@
       h += '<label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" ' + (A.calMode ? 'checked' : '') + ' onchange="A.calMode=this.checked;render()" style="width:16px;height:16px;accent-color:var(--red);"> Ya</label>';
       h += '</div>';
 
-      h += '<div class="fg"><label>Waktu Default (' + tzLabel() + ')</label><input type="time" value="' + esc(A.calTime) + '" oninput="A.calTime=this.value"></div>';
+      h += '<div class="fg"><label>Waktu Default (' + tzLabel() + ')</label><input type="time" value="' + esc(A.calTime) + '" oninput="A.calTime=this.value;persistDraftState();"></div>';
 
       // ── Bulk Metadata (optional) ──────────────────────────────
       h += '<div class="cal-meta-section">';
-      h += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--t3);margin-bottom:8px">\ud83d\udcdd Update Metadata (Opsional)</div>';
+      h += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--t3);margin-bottom:8px">📝 Update Metadata (Opsional)</div>';
       h += '<label class="cml">Judul (1 Baris = 1 Video)</label>';
-      h += '<textarea id="cal-titles" rows="3" placeholder="Judul Video 1&#10;Judul Video 2" oninput="A.calMeta.titles=this.value">' + esc(A.calMeta.titles || '') + '</textarea>';
+      h += '<textarea id="cal-titles" rows="3" placeholder="Judul Video 1\\nJudul Video 2" oninput="A.calMeta.titles=this.value;persistDraftState();updateCharCounter(\'cal-titles-cnt\',this.value,100,true);">' + esc(A.calMeta.titles || '') + '</textarea>' + getCounterHtml('cal-titles-cnt', A.calMeta.titles, 100, true);
       h += '<label class="cml">Deskripsi (Untuk Semua Video)</label>';
-      h += '<textarea id="cal-desc" rows="2" placeholder="Deskripsi bersama..." oninput="A.calMeta.desc=this.value">' + esc(A.calMeta.desc || '') + '</textarea>';
+      h += '<textarea id="cal-desc" rows="2" placeholder="Deskripsi bersama..." oninput="A.calMeta.desc=this.value;persistDraftState();updateCharCounter(\'cal-desc-cnt\',this.value,5000,false);">' + esc(A.calMeta.desc || '') + '</textarea>' + getCounterHtml('cal-desc-cnt', A.calMeta.desc, 5000, false);
       h += '<label class="cml">Tags (Pisahkan koma)</label>';
-      h += '<input type="text" id="cal-tags" placeholder="tag1, tag2" value="' + esc(A.calMeta.tags || '') + '" oninput="A.calMeta.tags=this.value">';
+      h += '<input type="text" id="cal-tags" placeholder="tag1, tag2" value="' + esc(A.calMeta.tags || '') + '" oninput="A.calMeta.tags=this.value;persistDraftState();updateCharCounter(\'cal-tags-cnt\',this.value,500,false);">' + getCounterHtml('cal-tags-cnt', A.calMeta.tags, 500, false);
       h += '</div>';
 
-      var drafts = getDrafts().filter(function (v) { return !A.scheduled[v.id] && !A.calScheduled[v.id]; });
+      var allCalDrafts = getDrafts().filter(function (v) { return !A.scheduled[v.id] && !A.calScheduled[v.id]; });
+      var drafts = allCalDrafts;
+      if (A.searchQuery) {
+        var q = A.searchQuery.toLowerCase();
+        drafts = drafts.filter(function (v) { return getTitle(v).toLowerCase().includes(q); });
+      }
 
       h += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--t3);margin:12px 0 8px;">Draft Queue (' + drafts.length + ')</div>';
+      h += renderSearchBar();
 
       if (drafts.length > 0) {
         h += '<div style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:5px;padding-right:4px;">';
@@ -2842,6 +2935,8 @@
         });
         if (drafts.length > 20) h += '<div style="font-size:10px;color:var(--t3);text-align:center;margin-top:4px;">+' + (drafts.length - 20) + ' lainnya</div>';
         h += '</div>';
+      } else if (allCalDrafts.length > 0) {
+        h += '<div style="font-size:11px;color:var(--t3);padding:8px 0;text-align:center;">Tidak ada video yang cocok</div>';
       } else {
         h += '<div style="font-size:11px;color:var(--t3);">Tidak ada draft.</div>';
       }
@@ -2850,8 +2945,11 @@
       if (tempCount > 0) {
         h += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">';
         h += '<div class="info-orange" style="font-size:11px;margin-bottom:8px;">Ada ' + tempCount + ' video belum disimpan!</div>';
-        h += '<div style="display:flex;gap:8px;">';
-        h += '<button class="btn btn-sm btn-ghost" onclick="A.calScheduled={};render()">Reset</button>';
+        h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+        h += '<button class="btn btn-sm btn-ghost" onclick="A.calScheduled={};A.calHistory=[];persistDraftState();render()">Reset</button>';
+        if (A.calHistory && A.calHistory.length > 0) {
+          h += '<button class="btn btn-sm" onclick="undoCal()">Undo (\u21a9)</button>';
+        }
         h += '<button class="btn btn-red btn-sm" style="flex:1;" id="cal-save-btn" onclick="prepareCalSave()">\ud83d\udcbe Simpan ke YT</button>';
         h += '</div>';
         h += '</div>';
@@ -2905,6 +3003,10 @@
       } else {
         h += '<div style="padding:9px 12px;border-radius:var(--r3);font-size:12px;margin-bottom:10px;background:var(--green-bg);color:var(--green);border:1px solid var(--green-b);flex-shrink:0">';
         h += '\u2713 Semua judul valid. Klik <b>Ya, Simpan</b> untuk mengirim ke YouTube API.</div>';
+      }
+
+      if (pd.hasCollision) {
+        h += '<div class="info-orange" style="margin-bottom:10px;font-size:12px;line-height:1.5;flex-shrink:0;">\u26a0\ufe0f Peringatan: Ada beberapa video yang dijadwalkan pada waktu yang persis sama. Lanjutkan jika memang disengaja.</div>';
       }
 
       h += '<div class="modal-scroll">';
@@ -3002,6 +3104,18 @@
     A.channels = lsCh();
     if (A.channels.length && getClientIds().length) {
       A.step = 'setup'; // show channel selector, not blank setup
+    }
+    try {
+      var savedState = sessionStorage.getItem('yt_draft_state');
+      if (savedState) {
+        var parsed = JSON.parse(savedState);
+        if (parsed.bulk) Object.assign(A.bulk, parsed.bulk);
+        if (parsed.calScheduled) A.calScheduled = parsed.calScheduled;
+        if (parsed.calHistory) A.calHistory = parsed.calHistory;
+        if (parsed.calMeta) Object.assign(A.calMeta, parsed.calMeta);
+      }
+    } catch (e) {
+      console.warn('Failed to restore draft state', e);
     }
     render();
   </script>
