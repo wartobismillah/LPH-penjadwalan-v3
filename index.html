@@ -1522,7 +1522,7 @@
     function renderSearchBar() {
       var val = esc(A.searchQuery || '');
       var h = '<div style="position:relative;margin-bottom:10px;display:flex;align-items:center;">';
-      h += '<input type="text" placeholder="🔍 Cari judul video..." value="' + val + '" oninput="A.searchQuery=this.value;render()" style="width:100%;padding:6px 26px 6px 10px;font-size:12px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text);">';
+      h += '<input type="text" id="search-bar-input" placeholder="🔍 Cari judul video..." value="' + val + '" oninput="A.searchQuery=this.value;render()" style="width:100%;padding:6px 26px 6px 10px;font-size:12px;border:1px solid var(--border2);border-radius:var(--r2);background:var(--card);color:var(--text);">';
       if (A.searchQuery) {
         h += '<button onclick="A.searchQuery=\'\';render()" style="position:absolute;right:6px;background:none;border:none;color:var(--t3);cursor:pointer;font-size:16px;padding:0 6px;line-height:1;" title="Hapus pencarian">×</button>';
       }
@@ -2194,8 +2194,19 @@
     }
     function selectAllBulk() {
       var unscheduled = getDrafts().filter(function (v) { return !A.scheduled[v.id] });
-      if (A.bulk.selected.length === unscheduled.length && unscheduled.length > 0) A.bulk.selected = [];
-      else A.bulk.selected = unscheduled.map(function (v) { return v.id });
+      var q = (A.searchQuery || '').toLowerCase();
+      var targetList = q ? unscheduled.filter(function (v) { return getTitle(v).toLowerCase().includes(q); }) : unscheduled;
+      var targetIds = targetList.map(function (v) { return v.id });
+      if (!targetIds.length) return;
+
+      var allTargetSelected = targetIds.every(function (id) { return A.bulk.selected.indexOf(id) > -1 });
+      if (allTargetSelected) {
+        A.bulk.selected = A.bulk.selected.filter(function (id) { return targetIds.indexOf(id) === -1 });
+      } else {
+        targetIds.forEach(function (id) {
+          if (A.bulk.selected.indexOf(id) === -1) A.bulk.selected.push(id);
+        });
+      }
       persistDraftState();
       render();
     }
@@ -2701,10 +2712,13 @@
       left += '</div></div>';
 
       // RIGHT: video selection + preview
+      var q = (A.searchQuery || '').toLowerCase();
+      var matchingUnsched = q ? unscheduled.filter(function (v) { return getTitle(v).toLowerCase().includes(q); }) : unscheduled;
+      var allMatchingSel = matchingUnsched.length > 0 && matchingUnsched.every(function (v) { return b.selected.indexOf(v.id) > -1 });
       var right = '<div>';
       right += '<div class="panel" style="margin-bottom:12px">';
       right += '<div class="panel-head">📋 Pilih Video yang Akan Dijadwalkan ' +
-        '<button class="btn btn-xs btn-ghost" onclick="selectAllBulk()">' + (selCount === unscheduled.length && unscheduled.length > 0 ? 'Batal Semua' : 'Pilih Semua') + '</button></div>';
+        '<button class="btn btn-xs btn-ghost" onclick="selectAllBulk()">' + (allMatchingSel ? 'Batal Semua' : 'Pilih Semua') + '</button></div>';
       right += '<div class="panel-body" style="padding:10px">';
 
       if (!unscheduled.length) {
@@ -2821,7 +2835,11 @@
       }
 
       var drafts = getDrafts().filter(function (v) { return !A.scheduled[v.id] && !A.calScheduled[v.id]; });
-      if (drafts.length === 0) { toast('Tidak ada draft tersisa!', 'inf'); return; }
+      if (A.searchQuery && A.searchQuery.trim() !== '') {
+        var q = A.searchQuery.toLowerCase();
+        drafts = drafts.filter(function (v) { return getTitle(v).toLowerCase().includes(q); });
+      }
+      if (drafts.length === 0) { toast('Tidak ada draft tersisa yang cocok dengan filter!', 'inf'); return; }
       var v = drafts[0];
 
       A.calScheduled[v.id] = utcPub;
@@ -3076,6 +3094,11 @@
 
     function render() {
       var root = $('root'); if (!root) return;
+      var focusId = document.activeElement ? document.activeElement.id : null;
+      var selStart = null, selEnd = null;
+      if (focusId && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
+        try { selStart = document.activeElement.selectionStart; selEnd = document.activeElement.selectionEnd; } catch (e) {}
+      }
       var h = '';
       if (A.step === 'setup') h = renderSetup();
       else if (A.step === 'loading') h = '<div class="loader"><div class="spinner"></div> Memuat video dari YouTube...</div>';
@@ -3086,6 +3109,15 @@
       if (A.modal === 'error') h += renderErrorModal();
       if (A.modal === 'confirm_save') h += renderConfirmSaveModal();
       root.innerHTML = h; renderHeader();
+      if (focusId) {
+        var el = $(focusId);
+        if (el && typeof el.focus === 'function') {
+          el.focus();
+          if (selStart !== null && selEnd !== null && typeof el.setSelectionRange === 'function') {
+            try { el.setSelectionRange(selStart, selEnd); } catch (e) {}
+          }
+        }
+      }
     }
 
     function renderErrorModal() {
