@@ -1,6 +1,42 @@
 <!DOCTYPE html>
 <html lang="id">
 
+<!--
+════════════════════════════════════════════════════════════════════════════════════════════
+   📅 YOUTUBE MULTI-CHANNEL SCHEDULER (VERSI UPGRADE v4 / UPDATED)
+════════════════════════════════════════════════════════════════════════════════════════════
+
+⚡ APA YANG BARU / BEDANYA DI VERSI UPGRADE INI?
+Berikut adalah rincian 3 Bug Fix dan 3 Fitur Baru (serta 3 perbaikan logika tambahan) yang telah diterapkan tanpa mengubah logika core YouTube API & OAuth:
+
+=== 🛠 PART 1: BUG FIXES & UX IMPROVEMENTS ===
+1. Mencegah Grid Kalender Rusak (CSS Grid Blowout Fix):
+   - Ditambahkan properti `min-width: 0;` pada kelas `.cal-cell`. Jika judul video sangat panjang di dalam kalender (.cal-ev), teks akan dipotong rapi dengan ellipsis (...) tanpa mendorong kolom hari Sabtu keluar layar.
+2. Fitur Pencarian & Filter Real-Time (Search & Filter Bar):
+   - Ditambahkan kotak pencarian cepat (dengan tombol hapus '×') pada tab Bulk ("Belum Dijadwalkan") dan tab Kalender ("Draft Queue").
+   - Filter bekerja secara dinamis dan real-time, serta menampilkan pesan "Tidak ada video yang cocok" jika hasil pencarian kosong.
+   - [Perbaikan v2]: Mengetik di kotak pencarian kini dijamin TIDAK LEPAS fokus (cursor & focus preservation). Anda bisa mengetik mulus tanpa harus klik per huruf.
+3. Tombol Undo Penjadwalan Kalender (Calendar Undo):
+   - Ditambahkan pelacakan riwayat jadwal (`A.calHistory`) dan tombol "Undo (↩)" di sidebar Kalender. Anda bisa membatalkan tanggal yang baru saja diklik selangkah demi selangkah.
+   - [Perbaikan v2]: Klik tanggal pada kalender kini secara ketat HANYA menjadwalkan video yang lolos filter pencarian aktif, dan akan berhenti memberi tahu bila draft terfilter sudah habis.
+
+=== 🚀 PART 2: WORKFLOW ENHANCEMENTS ===
+4. Live Character Counter untuk Metadata (Judul, Deskripsi, Tags):
+   - Ditambahkan indikator batas karakter [current]/[max] secara live di bawah form metadata.
+   - Untuk judul bulk/kalender ("1 Baris = 1 Video"), sistem menghitung berdasarkan BARIS TERPANJANG (bukan total karakter gabungan), sehingga akurat memvalidasi batas 100 karakter YouTube.
+   - Angka akan berubah menjadi MERAH TEBAL (#DC2626) apabila melebihi batas ketentuan YouTube.
+5. Peringatan Bentrokan Waktu (Non-Blocking Schedule Collision Warning):
+   - Sistem otomatis mendeteksi jika ada 2 atau lebih video yang dijadwalkan pada tanggal dan jam yang persis sama.
+   - Menampilkan banner peringatan warna oranye di dalam Modal Konfirmasi Simpan, namun tombol "Ya, Simpan" tetap aktif (non-blocking) jika Anda memang sengaja melakukannya.
+6. Penyimpanan Draft Otomatis (Anti Data-Loss via sessionStorage):
+   - Seluruh pilihan checkbox video, tanggal jadwal, riwayat undo, interval, dan teks metadata otomatis disimpan ke `sessionStorage` (`yt_draft_state`).
+   - Jika browser tidak sengaja ter-refresh (F5), seluruh pekerjaan draft Anda langsung dipulihkan 100%. Data draft akan bersih otomatis hanya ketika tab browser ditutup.
+   - [Perbaikan v2]: Tombol "Pilih Semua" dan "Batal Semua" di tab Bulk kini secara presisi HANYA memilih/membatalkan video yang sedang terfilter di layar.
+
+════════════════════════════════════════════════════════════════════════════════════════════
+-->
+
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1455,7 +1491,7 @@
       step: 'setup', channels: lsCh(), active: null, token: '',
       cidIdx: 0,          // index ke getClientIds() yang sedang dipakai
       tokenExpiry: 0,     // timestamp ms kapan token expired
-      pendingTask: null,  // { type:'bulk'|'cal', remaining, ok, fail, titleLines, descText, tagsArr, startIndex, hasMeta } — snapshot antrean yang terhenti karena 403_QUOTA
+      pendingTask: null,  // { type:'bulk'|'cal'|'reload', remaining, ok, fail, titleLines, descText, tagsArr, startIndex, hasMeta } — snapshot antrean yang terhenti karena 403_QUOTA
       videos: [], scheduled: {},
       calScheduled: {}, calHistory: [], searchQuery: '',
       filter: 'all', tab: 'list',
@@ -1650,29 +1686,43 @@
           scope: 'https://www.googleapis.com/auth/youtube',
           callback: async function (r) {
             if (r.error) {
-              // Try next clientId if available
+              // Jika ada pendingTask, coba rotate ke CID berikutnya dan sign in lagi
               var nextIdx = (A.cidIdx + 1);
               if (ids.length > 1 && nextIdx < ids.length) {
                 toast('Client ID #' + (A.cidIdx + 1) + ' gagal, coba #' + (nextIdx + 1) + '...', 'inf');
                 A.cidIdx = nextIdx;
                 setTimeout(function () { signIn(ch, nextIdx) }, 500);
               } else {
-                toast('Login gagal: ' + r.error, 'err');
+                // Semua CID sudah dicoba, biarkan user pilih manual
+                toast('Login gagal: ' + r.error + '. Semua Client ID sudah dicoba.', 'err');
+                A.pendingTask = null;
+                A.step = 'setup';
+                render();
               }
               return;
             }
             A.token = r.access_token;
             A.tokenExpiry = Date.now() + (r.expires_in || 3600) * 1000;
 
-            // Auto-resume: if this sign-in happened because a 403_QUOTA pause
-            // auto-rotated the CID mid-task, don't re-run pickChannel/fetchVideos
-            // (that would burn more quota) — just plug the fresh token into the
-            // paused queue and continue exactly where it left off.
+            // Auto-resume: jika sign-in terjadi karena 403_QUOTA pause
+            // yang auto-rotate CID di tengah task.
             if (A.pendingTask) {
-              A.active = ch;
-              toast('Melanjutkan sisa antrean...', 'inf');
-              render();
-              await resumePendingTask();
+              if (A.pendingTask.type === 'reload') {
+                // Quota habis saat memuat video awal — muat ulang video dengan token baru
+                A.pendingTask = null;
+                A.active = ch;
+                A.scheduled = loadSched(ch);
+                A.hidden = loadHidden(ch);
+                toast('Token baru diperoleh. Memuat video...', 'inf');
+                A.step = 'loading'; render();
+                await pickChannel();
+              } else {
+                // Quota habis di tengah queue (bulk/cal) — lanjutkan antrean
+                A.active = ch;
+                toast('Melanjutkan sisa antrean dengan Client ID baru...', 'inf');
+                render();
+                await resumePendingTask();
+              }
               return;
             }
 
@@ -1687,8 +1737,13 @@
       var ids = getClientIds();
       if (ids.length <= 1) { toast('Hanya ada 1 Client ID di config', 'inf'); return; }
       A.cidIdx = (A.cidIdx + 1) % ids.length;
-      toast('Beralih ke Client ID #' + (A.cidIdx + 1), 'inf');
-      if (A.active) signIn(A.active, A.cidIdx);
+      toast('Beralih ke Client ID #' + (A.cidIdx + 1) + ', menunggu OAuth...', 'inf');
+      if (A.active) {
+        // Kosongkan token lama agar tidak terjadi race condition
+        A.token = '';
+        A.tokenExpiry = 0;
+        signIn(A.active, A.cidIdx);
+      }
     }
     // After login: fetch all YT channels for this account, let user pick
     async function pickChannel() {
@@ -1731,30 +1786,45 @@
       var ch = A.ytSelectedChannel;
       var snap = ch ? ch.snippet || {} : {};
       var stats = ch ? ch.statistics || {} : {};
-      var thumb = snap.thumbnails && (snap.thumbnails.medium || snap.thumbnails.default);
-      var name = snap.title || 'Channel tidak diketahui';
+      // Coba semua ukuran thumbnail (medium > default > high)
+      var thumb = snap.thumbnails &&
+        (snap.thumbnails.medium || snap.thumbnails.default || snap.thumbnails.high || snap.thumbnails.maxres);
+      var name = snap.title || (A.active ? A.active.name : 'Channel tidak diketahui');
       var handle = snap.customUrl ? snap.customUrl : '';
       if (handle && handle[0] !== '@') handle = '@' + handle;
       var subs = stats.subscriberCount ? parseInt(stats.subscriberCount).toLocaleString('id-ID') + ' subscriber' : '';
 
+      var ids = getClientIds();
+      var cidBadge = ids.length > 1
+        ? '<span style="font-size:10px;background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-b);padding:2px 8px;border-radius:4px;margin-left:8px">CID #' + (A.cidIdx + 1) + '/' + ids.length + '</span>'
+        : '';
+
       var h = '<div style="max-width:460px;margin:2rem auto">';
       h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:1.5rem;box-shadow:var(--sh)">';
-      h += '<h2 style="font-size:17px;font-weight:700;margin-bottom:4px">Konfirmasi Channel</h2>';
+      h += '<h2 style="font-size:17px;font-weight:700;margin-bottom:4px">Konfirmasi Channel ' + cidBadge + '</h2>';
       h += '<p style="font-size:13px;color:var(--t2);margin-bottom:1.25rem;line-height:1.55">' +
         'Apakah ini channel yang ingin kamu jadwalkan?</p>';
 
       // Channel card
       h += '<div style="display:flex;align-items:center;gap:14px;padding:14px;background:var(--hover);border-radius:var(--r2);margin-bottom:1.25rem">';
       if (ch) {
-        h += (thumb ? '<img src="' + esc(thumb.url) + '" style="width:56px;height:56px;border-radius:50%;object-fit:cover;flex-shrink:0">' :
-          '<div style="width:56px;height:56px;border-radius:50%;background:var(--red);display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:700;flex-shrink:0">' + esc(name[0]) + '</div>');
+        // Tampilkan thumbnail; gunakan onerror fallback ke inisial
+        var thumbUrl = thumb ? esc(thumb.url) : '';
+        var initial = esc(name ? name[0].toUpperCase() : '?');
+        if (thumbUrl) {
+          h += '<img src="' + thumbUrl + '" style="width:56px;height:56px;border-radius:50%;object-fit:cover;flex-shrink:0" ' +
+               'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">';
+          h += '<div style="width:56px;height:56px;border-radius:50%;background:var(--red);display:none;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:700;flex-shrink:0">' + initial + '</div>';
+        } else {
+          h += '<div style="width:56px;height:56px;border-radius:50%;background:var(--red);display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:700;flex-shrink:0">' + initial + '</div>';
+        }
         h += '<div>';
         h += '<div style="font-size:15px;font-weight:700">' + esc(name) + '</div>';
         if (handle) h += '<div style="font-size:12px;color:var(--t3);margin-top:2px">' + esc(handle) + '</div>';
         if (subs) h += '<div style="font-size:12px;color:var(--t3);margin-top:1px">' + esc(subs) + '</div>';
         h += '</div>';
       } else {
-        h += '<div style="font-size:13px;color:var(--t3)">Tidak ada channel ditemukan.</div>';
+        h += '<div style="font-size:13px;color:var(--t3)">Tidak ada channel ditemukan di akun ini.</div>';
       }
       h += '</div>';
 
@@ -1765,16 +1835,36 @@
 
       // Help: wrong channel
       h += '<div style="margin-top:14px;padding:12px;background:var(--orange-bg);border:1px solid var(--orange-b);border-radius:var(--r2)">';
-      h += '<div style="font-size:12px;font-weight:700;color:var(--orange);margin-bottom:6px">⚠ Channel salah?</div>';
+      h += '<div style="font-size:12px;font-weight:700;color:var(--orange);margin-bottom:6px">⚠ Channel salah / ingin ganti?</div>';
       h += '<div style="font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:8px">' +
-        'Jika channel di atas bukan yang kamu mau, klik tombol di bawah dan <b>pilih identitas YouTube yang berbeda</b> di popup Google.' +
-        '<br><br>Contoh: jika muncul opsi "<b>NamaChannel (YouTube)</b>", pilih itu — bukan akun Gmail.' +
+        'Jika channel di atas bukan yang kamu mau, gunakan salah satu tombol di bawah:' +
+        '<br>• <b>Ganti Akun Google</b> — pilih akun/identitas YouTube berbeda di popup Google.' +
+        '<br>• <b>Ganti Client ID</b> — rotate ke Client ID berikutnya (jika ada &gt;1 CID).' +
         '</div>';
-      h += '<button class="btn btn-sm" onclick="reloginDifferentChannel()">🔄 Ganti Channel / Akun</button>';
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+      h += '<button class="btn btn-sm" onclick="reloginDifferentChannel()">🔄 Ganti Akun Google</button>';
+      if (ids.length > 1) {
+        h += '<button class="btn btn-sm" onclick="rotateAndRepickChannel()">⇄ Ganti Client ID (#' + (A.cidIdx + 1) + ' → #' + ((A.cidIdx % ids.length) + 2 > ids.length ? 1 : (A.cidIdx % ids.length) + 2) + ')</button>';
+      }
+      h += '</div>';
       h += '</div>';
 
       h += '</div></div>';
       return h;
+    }
+
+    // Rotate CID dan ulangi seluruh proses pick channel (tanpa menyimpan pendingTask)
+    function rotateAndRepickChannel() {
+      var ids = getClientIds();
+      if (ids.length <= 1) { toast('Hanya ada 1 Client ID di config', 'inf'); return; }
+      A.cidIdx = (A.cidIdx + 1) % ids.length;
+      toast('Beralih ke Client ID #' + (A.cidIdx + 1) + '. Silakan login ulang...', 'inf');
+      A.token = '';
+      A.tokenExpiry = 0;
+      A.ytChannels = [];
+      A.ytSelectedChannel = null;
+      A.pendingTask = null; // bukan resume, tapi fresh pick
+      if (A.active) signIn(A.active, A.cidIdx);
     }
 
     async function fetchVideos() {
@@ -1830,9 +1920,27 @@
         saveSched(); A.step = 'dashboard'; render();
       } catch (e) {
         var msg = e.message || '';
-        if (msg.includes('403')) msg = 'Akses ditolak — pastikan YouTube Data API v3 aktif di Google Cloud';
-        else if (msg.includes('401')) msg = 'Token tidak valid — coba Sign In ulang';
-        else if (msg.includes('quota')) msg = 'Quota API habis — coba lagi besok atau ganti Client ID';
+        var isQuota = (msg === '403_QUOTA') || msg.toLowerCase().includes('quota') ||
+                      msg.includes('403') || msg.includes('rateLimitExceeded') || msg.includes('quotaExceeded');
+        if (isQuota) {
+          // Quota habis saat muat awal — simpan pendingTask type 'reload'
+          // dan auto-rotate CID supaya langsung popup login baru
+          var ids = getClientIds();
+          if (ids.length > 1) {
+            A.pendingTask = { type: 'reload' };
+            A.cidIdx = (A.cidIdx + 1) % ids.length;
+            toast('Quota habis saat memuat video. Mengganti Client ID #' + (A.cidIdx + 1) + ' otomatis...', 'inf');
+            A.token = '';
+            A.tokenExpiry = 0;
+            // Beri jeda kecil agar toast terlihat sebelum popup OAuth muncul
+            setTimeout(function () { signIn(A.active, A.cidIdx); }, 800);
+          } else {
+            toast('Quota API habis — hanya 1 Client ID tersedia. Coba lagi besok atau tambah Client ID cadangan.', 'err');
+            A.step = 'pick_channel'; render();
+          }
+          return;
+        }
+        if (msg.includes('401')) msg = 'Token tidak valid — coba Sign In ulang';
         toast('Gagal memuat: ' + msg, 'err');
         A.step = 'pick_channel'; render();
       }
@@ -2064,6 +2172,7 @@
     // Called from signIn()'s callback once a fresh token is acquired and
     // A.pendingTask is present. Consumes the snapshot and re-enters whichever
     // queue runner was interrupted, at the exact index it stopped at.
+    // Type 'reload' ditangani langsung di signIn callback, bukan di sini.
     async function resumePendingTask() {
       if (!A.pendingTask) return;
       var task = A.pendingTask;
@@ -2073,6 +2182,7 @@
       } else if (task.type === 'cal') {
         await runCalQueue(task.remaining, task.ok, task.fail, task.hasMeta, task.titleLines, task.descText, task.tagsArr, task.startIndex);
       }
+      // 'reload' type tidak seharusnya sampai sini (sudah dihandle di signIn callback)
     }
 
     async function applyBulk() {
@@ -2475,10 +2585,13 @@
         // Auto-rotate & re-sign when expired
         if (A.tokenExpiry && Date.now() > A.tokenExpiry && A.active) {
           A.tokenExpiry = 0; A._warned = false;
+          A.token = ''; // kosongkan token lama
           var ids = getClientIds();
           if (ids.length > 1) {
             A.cidIdx = (A.cidIdx + 1) % ids.length;
-            toast('Token expired → otomatis ganti ke Client ID #' + (A.cidIdx + 1), 'inf');
+            toast('Token expired → otomatis ganti ke Client ID #' + (A.cidIdx + 1) + '...', 'inf');
+            // Simpan pendingTask reload agar setelah login langsung ke dashboard
+            if (!A.pendingTask) A.pendingTask = { type: 'reload' };
             signIn(A.active, A.cidIdx);
           } else {
             toast('Token expired — silakan Sign In ulang', 'inf');
